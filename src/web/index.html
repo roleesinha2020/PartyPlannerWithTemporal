@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Party Planner</title>
+<style>
+  :root { --bg:#f6f4ef; --card:#fff; --ink:#1f1d1a; --muted:#7a746b; --line:#e6e1d8;
+          --yes:#2f7d4f; --no:#b2443a; --maybe:#b7811f; --accent:#3d5a80; --bubble:#dcf8c6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161513; --card:#201f1c; --ink:#ece8e1; --muted:#9a948a; --line:#34312c; --bubble:#1f3b2a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:1000px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 22px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:22px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .pill { font-size:12px; font-weight:600; padding:3px 9px; border-radius:99px; border:1px solid var(--line); }
+  .RUNNING { color:var(--accent); } .COMPLETED { color:var(--yes); } .NOT_STARTED, .UNKNOWN { color:var(--muted); } .NO_WORKER { color:var(--no); }
+  .stat { margin-left:auto; color:var(--muted); }
+  .stat b { color:var(--ink); font-size:18px; }
+  select, button { font:inherit; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); padding:6px 12px; }
+  button { cursor:pointer; } button:disabled { opacity:.4; cursor:default; }
+  .primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .phones { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:18px; }
+  .phone { background:var(--card); border:1px solid var(--line); border-radius:22px; padding:14px; min-height:300px; display:flex; flex-direction:column; }
+  .phone header { display:flex; justify-content:space-between; align-items:baseline; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:10px; }
+  .phone header small { color:var(--muted); }
+  .msgs { flex:1; display:flex; flex-direction:column; gap:8px; }
+  .bubble { background:var(--bubble); border-radius:12px 12px 12px 3px; padding:8px 10px; max-width:92%; }
+  .bubble time { display:block; font-size:11px; color:var(--muted); margin-top:3px; }
+  .empty { color:var(--muted); font-size:13px; margin:auto; text-align:center; }
+  .answer { font-weight:600; font-size:13px; }
+  .yes { color:var(--yes); } .no { color:var(--no); } .maybe { color:var(--maybe); } .pending { color:var(--muted); }
+  .actions { display:flex; gap:6px; margin-top:12px; }
+  .actions button { flex:1; }
+  .error { color:var(--no); font-size:13px; }
+  .diet { display:flex; gap:6px; margin-top:8px; }
+  .diet input { flex:1; min-width:0; font:inherit; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); padding:6px 10px; }
+  .menu { list-style:none; padding:0; margin:14px 0 0; display:grid; gap:6px; }
+  .menu li span { display:inline-block; width:80px; color:var(--muted); text-transform:capitalize; }
+  .muted { color:var(--muted); font-size:13px; margin:10px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Party Planner</h1>
+  <p class="sub" id="subtitle">Loading…</p>
+
+  <section class="panel">
+    <div class="row">
+      <span>Workflow <code id="wfid"></code></span>
+      <span class="pill" id="state">…</span>
+      <span class="stat">Attending <b id="attending">0</b> / <span id="total">0</span></span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label>Deadline
+        <select id="deadline">
+          <option>30 seconds</option><option selected>2 minutes</option><option>10 minutes</option>
+        </select>
+      </label>
+      <label>Diet deadline
+        <select id="mealDeadline">
+          <option>30 seconds</option><option selected>2 minutes</option><option>10 minutes</option>
+        </select>
+      </label>
+      <button class="primary" id="start">Send invitations</button>
+      <span class="error" id="error"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="meal" hidden>
+    <div class="row">
+      <span>Child workflow <code id="mealId"></code></span>
+      <span class="pill" id="mealState">…</span>
+    </div>
+    <div id="menu"></div>
+  </section>
+
+  <section class="phones" id="phones"></section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); });
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+  const showError = (e) => { $('error').textContent = e ? e.message : ''; };
+
+  let lastRender = '';
+
+  async function refresh() {
+    const s = await fetch('/api/state').then((r) => r.json());
+    // Re-render only when something changed, so text you're typing isn't wiped.
+    const key = JSON.stringify(s);
+    if (key === lastRender) return;
+    lastRender = key;
+    const typed = Object.fromEntries([...document.querySelectorAll('.diet input')].map((i) => [i.dataset.guest, i.value]));
+    const focused = document.activeElement?.dataset?.guest;
+
+    $('title').textContent = `🍽️ ${s.party.title}`;
+    $('subtitle').textContent = `Hosted by ${s.party.host} on ${s.party.date}`;
+    $('wfid').textContent = s.workflowId;
+    const label = s.state === 'NO_WORKER' ? 'RUNNING · no worker answering — start one with npm run worker:web'
+      : s.status?.deadlinePassed ? 'DEADLINE PASSED' : s.state.replace('_', ' ');
+    $('state').textContent = label;
+    $('state').className = `pill ${s.state}`;
+    $('attending').textContent = s.status?.attending ?? 0;
+    $('total').textContent = s.guests.length;
+    const running = s.state === 'RUNNING' || s.state === 'NO_WORKER';
+    const meal = s.meal;
+    const mealActive = meal.state === 'RUNNING' || meal.state === 'NO_WORKER';
+    $('start').disabled = running || mealActive;
+
+    // Meal-planning panel (the chained child workflow).
+    $('meal').hidden = meal.state === 'NOT_STARTED';
+    $('mealId').textContent = s.mealWorkflowId;
+    $('mealState').textContent = meal.state === 'NO_WORKER' ? 'RUNNING · no worker answering'
+      : meal.status ? meal.status.stage.replace('-', ' ') : meal.state;
+    $('mealState').className = `pill ${meal.state}`;
+    const menu = meal.status?.menu;
+    $('menu').innerHTML = menu
+      ? `<ul class="menu">${menu.dishes.map((d) => `<li><span>${d.course}</span>${esc(d.name)}</li>`).join('')}</ul>
+         <p class="muted">Serves ${menu.serves}${menu.accommodates.length ? ` · ${menu.accommodates.join(', ')}` : ''}</p>
+         ${menu.notes.length ? `<p class="error">Check by hand: ${menu.notes.map(esc).join(', ')}</p>` : ''}`
+      : '<p class="muted">Waiting for dietary replies from attendees…</p>';
+
+    $('phones').innerHTML = s.guests.map((g) => {
+      const msgs = s.inbox.filter((m) => m.to === g.phone);
+      const answer = s.status?.responses[g.name] ?? 'pending';
+      const bubbles = msgs.length
+        ? msgs.map((m) => `<div class="bubble">${esc(m.body)}<time>${new Date(m.at).toLocaleTimeString()}</time></div>`).join('')
+        : '<p class="empty">No messages yet</p>';
+      const canReply = running && msgs.length > 0;
+      const diets = meal.status?.diets ?? {};
+      const isAttendee = g.name in diets;
+      const diet = diets[g.name];
+      const askingDiet = isAttendee && diet === null && meal.status?.stage === 'collecting-diets';
+      return `<article class="phone">
+        <header><strong>${esc(g.name)}</strong><small>${esc(g.phone)}</small></header>
+        <div class="msgs">${bubbles}</div>
+        <div class="answer ${answer}">RSVP: ${answer}${isAttendee ? ` · Diet: ${diet === null ? 'pending' : esc(diet || 'none')}` : ''}</div>
+        ${askingDiet
+          ? `<form class="diet" data-guest="${esc(g.name)}">
+               <input data-guest="${esc(g.name)}" placeholder="e.g. vegetarian, nut allergy, none" />
+               <button>Reply</button>
+             </form>`
+          : `<div class="actions">
+               ${['yes', 'no', 'maybe'].map((r) =>
+                 `<button data-guest="${esc(g.name)}" data-r="${r}" ${canReply ? '' : 'disabled'}>${r[0].toUpperCase() + r.slice(1)}</button>`).join('')}
+             </div>`}
+      </article>`;
+    }).join('');
+
+    // Put back anything that was being typed.
+    document.querySelectorAll('.diet input').forEach((i) => {
+      if (typed[i.dataset.guest]) i.value = typed[i.dataset.guest];
+      if (i.dataset.guest === focused) i.focus();
+    });
+  }
+
+  $('start').onclick = () => post('/api/start', { deadline: $('deadline').value, mealDeadline: $('mealDeadline').value })
+    .then(() => showError(), showError).then(refresh);
+  $('phones').onclick = (e) => {
+    const b = e.target.closest('button[data-r]');
+    if (b) post('/api/rsvp', { guest: b.dataset.guest, response: b.dataset.r }).then(() => showError(), showError).then(refresh);
+  };
+  $('phones').onsubmit = (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const restrictions = form.querySelector('input').value.trim() || 'none';
+    post('/api/dietary', { guest: form.dataset.guest, restrictions }).then(() => showError(), showError).then(refresh);
+  };
+
+  refresh();
+  setInterval(() => refresh().catch(() => {}), 1000);
+</script>
+</body>
+</html>
